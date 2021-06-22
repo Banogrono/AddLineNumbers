@@ -1,0 +1,359 @@
+1. 	
+2. 	// CONFIG PIC16F877A
+3. 	#pragma config FOSC = HS    // (HS oscillator)
+4. 	#pragma config WDTE = OFF   // (WDT disabled)
+5. 	#pragma config PWRTE = OFF  // (PWRT disabled)
+6. 	#pragma config BOREN = OFF  // (BOR disabled)
+7. 	#pragma config LVP = ON     // (PGM function; low-volt. prog. enabled)
+8. 	#pragma config CPD = OFF    // (Data EEPROM code protection off)
+9. 	#pragma config WRT = OFF    // (Write protection off;)
+10. 	#pragma config CP = OFF     // (Code protection off)
+11. 	
+12. 	#include <xc.h>
+13. 	#include <stdlib.h>
+14. 	
+15. 	#include "board4_xtal.h"
+16. 	
+17. 	#include "lcd.h"
+18. 	#include "keyboard.h"
+19. 	
+20. 	
+21. 	#define BT_PRESS    0       // state of the pressed button
+22. 	#define BT_RELEASE  1       // state of the released button
+23. 	
+24. 	volatile unsigned char soft_timer_1;
+25. 	volatile unsigned char soft_timer_2;
+26. 	
+27. 	
+28. 	
+29. 	void interrupt isr(void){
+30. 	   // only process timer0-triggered interrupts
+31. 	   if(INTCONbits.TMR0IE && INTCONbits.TMR0IF) {
+32. 	      if (soft_timer_1) soft_timer_1--;
+33. 	      if (soft_timer_2) soft_timer_2--;
+34. 	      INTCONbits.TMR0IF = 0; // clear this interrupt condition
+35. 	      TMR0 = 13;
+36. 	   }
+37. 	}
+38. 	
+39. 	typedef enum {
+40. 	    STATE_POWERUP,        // stan po wlaczeniu zasilania
+41. 	    STATE_READY,          // stan gotowosci po sprawdzeniu czy wszystko OK
+42. 	    STATE_PREPARE,           // stan napelniania i grzania wody
+43. 	    STATE_MIX_IN,         // stan robienia kawy
+44. 	    STATE_ERROR,          // stan bledu; wymagana interwencja
+45. 	    STATE_FINISH          // koniec cyklu
+46. 	} STATE_t;
+47. 	
+48. 	char *coffee = "not selected"; // nazwa kawy do wyswietlenia
+49. 	
+50. 	STATE_t machine_state = STATE_POWERUP; // domyslny stan maszyny
+51. 	 unsigned char choice = 0; // domyslny wybor (brak wyboru)
+52. 	 int refresh_screen = 1;
+53. 	 int refresh_screenB = 1;
+54. 	 int error_code = 0;
+55. 	
+56.
+57. 	void readKey(int timeout) {
+58. 	    unsigned char tmp;
+59. 	            TRISD = 0x0F;
+60. 	        tmp = GetKeyTimeout(timeout);
+61. 	        if (tmp != 0) {
+62. 	            if(tmp > 0 && tmp < 10) {
+63. 	                tmp += (unsigned char)0x30;
+64. 	            } else {
+65. 	                if(tmp == 10) tmp = 0x2A;
+66. 	                if(tmp == 11) tmp = 0x30;
+67. 	                if(tmp == 12) tmp = 0x23;
+68. 	            }
+69. 	        }
+70. 	        TRISD = 0x00;
+71. 	        choice = tmp;
+72. 	}
+73. 	
+74. 	void init() {
+75. 	     // Ports Data Direction: 0 - output, 1 - input
+76. 	    TRISA = 0xC3;   // b10100011
+77. 	    //TRISB = 0x01;   // b00000001
+78. 	    TRISC = 0x01;   // b00000001
+79. 	    TRISD = 0x00;   // b00000000
+80. 	    TRISE = 0x00;   // b00000000
+81. 	
+82. 	
+83. 	    // A/D configuration (port A):
+84. 	    ADCON1 = 0x0F;  // b00000110 - port A as digital I/O
+85. 	
+86. 	    // Comparator configuration (port A):
+87. 	    CMCON  = 0x07;  // b00000111 - comparators Off
+88. 	
+89. 	    PORTB = 0;
+90. 	
+91. 	    TRISB = 0x02;     // enable RB1 button
+92. 	
+93. 	}
+94. 	
+95. 	void initTimer()   // Konfiguracja mikrokontrolera
+96. 	{
+97. 	    TRISA=0xFE;  // 0xFE = 11111110 - jedyne 0 odnosi sie do lampki
+98. 	    TRISB=0x00;
+99. 	
+100. 	    // Timer setup
+101. 	    /*
+102. 	    OPTION_REGbits.T0CS = 0;  // internal clock
+103. 	    OPTION_REGbits.T0SE = 1;  // incr. on high-to-low transition
+104. 	    OPTION_REGbits.PSA = 0;   // prescaler is assigned to timer 0
+105. 	    OPTION_REGbits.PS2 = 1;   // prescaler 1:256 - PS2:PS0 = 111
+106. 	    OPTION_REGbits.PS1 = 1;
+107. 	    OPTION_REGbits.PS0 = 1;
+108. 	     */
+109. 	    OPTION_REG = 0b11010111;
+110. 	    TMR0 = 13;                 // initial value
+111. 	
+112. 	    // Interrupt setup
+113. 	    INTCONbits.TMR0IE = 1;    // enable interrupts for timer 0
+114. 	    ei();
+115. 	}
+116. 	
+117. 	// -------------------- FUNKCJE DEKORACYJNE ---------------
+118. 	void inline heater_OFF() {}
+119. 	void inline check_ingredients() {}
+120. 	void inline add_water() {}
+121. 	void inline add_milk() {}
+122. 	void inline add_milk_foam() {}
+123. 	void inline add_coffee() {}
+124. 	void inline add_cocoa() {}
+125. 	void inline add_sugar() {}
+126. 	void inline check_cup() {}
+127. 	void inline pump_ON() {}
+128. 	void inline pump_OFF() {}
+129. 	void inline display_ON() {}
+130. 	void inline display_OFF() {}
+131. 	// ---------------------------------------------------------
+132. 	
+133. 	void inline heater_ON() {
+134. 	    LCD_Cmd(L_CLEAR);
+135. 	    LCD_Cmd(L_LINE_1); LCD_String("Woda gotowa ");
+136. 	    LCD_Cmd(L_LINE_2); LCD_String("Nacisnij RB1 ");
+137. 	}
+138. 	
+139. 	void inline check_water_level() {
+140. 	if (PORTBbits.RB4 == BT_PRESS){
+141. 	        machine_state = STATE_ERROR;
+142. 	        error_code = 102;
+143. 	    }
+144. 	}
+145. 	
+146. 	void inline check_temperature() {
+147. 	    if (PORTBbits.RB3 == BT_PRESS){
+148. 	        machine_state = STATE_ERROR;
+149. 	        error_code = 101;
+150. 	    }
+151. 	}
+152. 	
+153. 	void inline make_chosen_one() {
+154. 	    LCD_Cmd(L_CLEAR);
+155. 	    LCD_Cmd(L_LINE_1); LCD_String("Przygotowywanie");
+156. 	    LCD_Cmd(L_LINE_2); LCD_String("kawy...");
+157. 	
+158. 	    switch(choice) {
+159. 	        case 1:
+160. 	            add_water();
+161. 	            add_coffee();
+162. 	            add_milk();
+163. 	            add_sugar();
+164. 	            break;
+165. 	        case 2:
+166. 	            add_water();
+167. 	            add_coffee();
+168. 	            break;
+169. 	        case 3:
+170. 	            add_water();
+171. 	            add_coffee();
+172. 	            add_cocoa();
+173. 	            add_sugar();
+174. 	            add_milk();
+175. 	            break;
+176. 	        case 4:
+177. 	            add_water();
+178. 	            add_coffee();
+179. 	            add_milk_foam();
+180. 	            break;
+181. 	        default: break;
+182. 	    }
+183. 	}
+184. 	
+185. 	void display_menu() {
+186. 	        LCD_Cmd(L_CLEAR);
+187. 	        LCD_Cmd(L_LINE_1); LCD_String("Wybierz kawe ");
+188. 	        LCD_Cmd(L_LINE_2); LCD_String("1 - Latte ");
+189. 	        LCD_Cmd(L_LINE_3); LCD_String("2 - Espresso ");
+190. 	        LCD_Cmd(L_LINE_4); LCD_String("3 - Mocha ");
+191. 	
+192. 	
+193. 	        while (choice == 255 || choice == 0) {
+194. 	        readKey(0);
+195. 	        }
+196. 	        switch(choice) {
+197. 	            case 49:
+198. 	                coffee = "Latte";
+199. 	                break;
+200. 	            case 50:
+201. 	                coffee = "Espresso";
+202. 	                break;
+203. 	            case 51:
+204. 	                coffee = "Mocha";
+205. 	                break;
+206. 	
+207. 	        }
+208. 	}
+209. 	
+210. 	void display_notification(char *line_1, char *line_2, char *line_3, char *line_4 /*EACH MAX 16 CHARACTERS*/) {
+211. 	    LCD_Cmd(L_CLEAR);
+212. 	    LCD_Cmd(L_LINE_1); LCD_String(line_1);
+213. 	    LCD_Cmd(L_LINE_2); LCD_String(line_2);
+214. 	    LCD_Cmd(L_LINE_3); LCD_String(line_3);
+215. 	    LCD_Cmd(L_LINE_4); LCD_String(line_4);
+216. 	    return;
+217. 	}
+218. 	
+219. 	void main() {
+220. 	
+221. 	    initTimer();
+222. 	    init();
+223. 	    LCD_Init();
+224. 	    int cukier = 0;
+225. 	
+226. 	    while(1) {
+227. 	        switch(machine_state) {
+228. 	            case STATE_POWERUP:
+229. 	                TRISB = 0x02;
+230. 	                heater_OFF();
+231. 	                pump_OFF();
+232. 	                display_ON;
+233. 	
+234. 	                if (refresh_screen == 1) {
+235. 	                    display_menu();
+236. 	                    refresh_screen = 0;
+237. 	                    soft_timer_1 = 10;
+238. 	                }
+239. 	                if (soft_timer_1 == 0) {
+240. 	                    refresh_screen = 1;
+241. 	                    machine_state = STATE_READY;
+242. 	                    TRISB  = 0x3F;  // enable RB5-RB0 buttons
+243. 	                }
+244. 	                break;
+245. 	
+246. 	            case STATE_READY:
+247. 	                check_ingredients();
+248. 	                check_cup();
+249. 	
+250. 	                check_water_level();
+251. 	                check_temperature();
+252. 	
+253. 	                if (refresh_screen == 1) {
+254. 	                    display_notification("Wybrano kawe", coffee, "", "");
+255. 	                    refresh_screen = 0;
+256. 	                    soft_timer_1 = 10;
+257. 	                }
+258. 	                if (soft_timer_1 == 0) {
+259. 	                    machine_state = STATE_PREPARE;
+260. 	                    refresh_screen = 1;
+261. 	                }
+262. 	                break;
+263. 	
+264. 	            case STATE_PREPARE:
+265. 	                if (refresh_screen == 1) {
+266. 	                   pump_ON();
+267. 	                   heater_ON();
+268. 	                   refresh_screen = 0;
+269. 	                }
+270. 	                check_water_level();
+271. 	                check_temperature();
+272. 	
+273. 	                if (PORTBbits.RB1 == BT_PRESS){
+274. 	                    machine_state = STATE_MIX_IN;
+275. 	                    refresh_screen = 1;
+276. 	                    soft_timer_1 = 20;
+277. 	                }
+278. 	                break;
+279. 	
+280. 	            case STATE_MIX_IN:
+281. 	                if (soft_timer_1 > 0 && refresh_screenB == 1) {
+282. 	                    make_chosen_one();
+283. 	                    refresh_screenB = 0;
+284. 	                }
+285. 	                check_water_level();
+286. 	                check_temperature();
+287. 	
+288. 	                if (soft_timer_1 == 0) {
+289. 	                    heater_OFF();
+290. 	                    pump_OFF();
+291. 	                    if (refresh_screen == 1) {
+292. 	                        display_notification("Dodac cukier?", "TAK (RB1)", "NIE (RB2)", "");
+293. 	                        refresh_screen = 0;
+294. 	                    }
+295. 	                }
+296. 	                if (PORTBbits.RB1 == BT_PRESS && soft_timer_1 == 0){
+297. 	                    refresh_screen = 1;
+298. 	                    refresh_screenB = 1;
+299. 	                    cukier = 1;
+300. 	                    machine_state = STATE_FINISH;
+301. 	                }
+302. 	                else if (PORTBbits.RB2 == BT_PRESS && soft_timer_1 == 0){
+303. 	                    refresh_screen = 1;
+304. 	                    refresh_screenB = 1;
+305. 	                    cukier = 0;
+306. 	                    machine_state = STATE_FINISH;
+307. 	                }
+308. 	                break;
+309. 	
+310. 	            case STATE_FINISH:
+311. 	               if (refresh_screen == 1) {
+312. 	                   if (cukier) {
+313. 	                       display_notification("Dodano cukier","Smacznej Kawy!", "Wcisnij RB1", "by kontynuowac");
+314. 	                   }
+315. 	                   else
+316. 	                   {
+317. 	                    display_notification("Kawa gotowa!", "Wcisnij RB1", "by kontynuowac", "");
+318. 	                   }
+319. 	                    refresh_screen = 0;
+320. 	               }
+321. 	               if (PORTBbits.RB1 == BT_PRESS){
+322. 	                    machine_state = STATE_POWERUP;
+323. 	                    choice = 0;
+324. 	                    refresh_screen = 1;
+325. 	               }
+326. 	               break;
+327. 	
+328. 	            case STATE_ERROR:
+329. 	                heater_OFF();
+330. 	                pump_OFF();
+331. 	                if (refresh_screenB == 1) {
+332. 	                    switch(error_code) {
+333. 	                        case 102:
+334. 	                            display_notification("Wystapil blad!", "", "Sprawdz poziom", "wody!");
+335. 	                            break;
+336. 	                        case 101:
+337. 	                            display_notification("Wystapil blad!", "", "Temperatura", "za wysoka!");
+338. 	                            break;
+339. 	                        case 0:
+340. 	                            break;
+341. 	                        default:
+342. 	                            break;
+343. 	                    }
+344. 	                    refresh_screenB = 0;
+345. 	                }
+346. 	
+347. 	                if (PORTBbits.RB1 == BT_PRESS){
+348. 	                    machine_state = STATE_POWERUP;
+349. 	                    choice = 0;
+350. 	                    refresh_screen = 1;
+351. 	                    refresh_screenB = 1;
+352. 	               }
+353. 	                break;
+354. 	
+355. 	            default:
+356. 	                break;
+357. 	        }
+358. 	    }
+359. 	}

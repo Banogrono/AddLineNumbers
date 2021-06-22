@@ -1,0 +1,359 @@
+
+// CONFIG PIC16F877A
+#pragma config FOSC = HS    // (HS oscillator)
+#pragma config WDTE = OFF   // (WDT disabled)
+#pragma config PWRTE = OFF  // (PWRT disabled)
+#pragma config BOREN = OFF  // (BOR disabled)
+#pragma config LVP = ON     // (PGM function; low-volt. prog. enabled)
+#pragma config CPD = OFF    // (Data EEPROM code protection off)
+#pragma config WRT = OFF    // (Write protection off;)
+#pragma config CP = OFF     // (Code protection off)
+
+#include <xc.h>
+#include <stdlib.h>
+
+#include "board4_xtal.h"
+
+#include "lcd.h"
+#include "keyboard.h"
+
+
+#define BT_PRESS    0       // state of the pressed button
+#define BT_RELEASE  1       // state of the released button
+
+volatile unsigned char soft_timer_1;
+volatile unsigned char soft_timer_2;
+
+
+
+void interrupt isr(void){
+   // only process timer0-triggered interrupts
+   if(INTCONbits.TMR0IE && INTCONbits.TMR0IF) {
+      if (soft_timer_1) soft_timer_1--;
+      if (soft_timer_2) soft_timer_2--;
+      INTCONbits.TMR0IF = 0; // clear this interrupt condition
+      TMR0 = 13;
+   }
+}
+
+typedef enum {
+    STATE_POWERUP,        // stan po wlaczeniu zasilania
+    STATE_READY,          // stan gotowosci po sprawdzeniu czy wszystko OK
+    STATE_PREPARE,           // stan napelniania i grzania wody
+    STATE_MIX_IN,         // stan robienia kawy
+    STATE_ERROR,          // stan bledu; wymagana interwencja
+    STATE_FINISH          // koniec cyklu
+} STATE_t;
+
+char *coffee = "not selected"; // nazwa kawy do wyswietlenia
+
+STATE_t machine_state = STATE_POWERUP; // domyslny stan maszyny
+ unsigned char choice = 0; // domyslny wybor (brak wyboru)
+ int refresh_screen = 1;
+ int refresh_screenB = 1;
+ int error_code = 0;
+
+ // zczytywanie klawiatury
+void readKey(int timeout) {
+    unsigned char tmp;
+            TRISD = 0x0F;
+        tmp = GetKeyTimeout(timeout);
+        if (tmp != 0) {
+            if(tmp > 0 && tmp < 10) {
+                tmp += (unsigned char)0x30;
+            } else {
+                if(tmp == 10) tmp = 0x2A;
+                if(tmp == 11) tmp = 0x30;
+                if(tmp == 12) tmp = 0x23;
+            }
+        }
+        TRISD = 0x00;
+        choice = tmp;
+}
+
+void init() {
+     // Ports Data Direction: 0 - output, 1 - input
+    TRISA = 0xC3;   // b10100011
+    //TRISB = 0x01;   // b00000001
+    TRISC = 0x01;   // b00000001
+    TRISD = 0x00;   // b00000000
+    TRISE = 0x00;   // b00000000
+
+
+    // A/D configuration (port A):
+    ADCON1 = 0x0F;  // b00000110 - port A as digital I/O
+
+    // Comparator configuration (port A):
+    CMCON  = 0x07;  // b00000111 - comparators Off
+
+    PORTB = 0;
+
+    TRISB = 0x02;     // enable RB1 button
+
+}
+
+void initTimer()   // Konfiguracja mikrokontrolera
+{
+    TRISA=0xFE;  // 0xFE = 11111110 - jedyne 0 odnosi sie do lampki
+    TRISB=0x00;
+
+    // Timer setup
+    /*
+    OPTION_REGbits.T0CS = 0;  // internal clock
+    OPTION_REGbits.T0SE = 1;  // incr. on high-to-low transition
+    OPTION_REGbits.PSA = 0;   // prescaler is assigned to timer 0
+    OPTION_REGbits.PS2 = 1;   // prescaler 1:256 - PS2:PS0 = 111
+    OPTION_REGbits.PS1 = 1;
+    OPTION_REGbits.PS0 = 1;
+     */
+    OPTION_REG = 0b11010111;
+    TMR0 = 13;                 // initial value
+
+    // Interrupt setup
+    INTCONbits.TMR0IE = 1;    // enable interrupts for timer 0
+    ei();
+}
+
+// -------------------- FUNKCJE DEKORACYJNE ---------------
+void inline heater_OFF() {}
+void inline check_ingredients() {}
+void inline add_water() {}
+void inline add_milk() {}
+void inline add_milk_foam() {}
+void inline add_coffee() {}
+void inline add_cocoa() {}
+void inline add_sugar() {}
+void inline check_cup() {}
+void inline pump_ON() {}
+void inline pump_OFF() {}
+void inline display_ON() {}
+void inline display_OFF() {}
+// ---------------------------------------------------------
+
+void inline heater_ON() {
+    LCD_Cmd(L_CLEAR);
+    LCD_Cmd(L_LINE_1); LCD_String("Woda gotowa ");
+    LCD_Cmd(L_LINE_2); LCD_String("Nacisnij RB1 ");
+}
+
+void inline check_water_level() {
+if (PORTBbits.RB4 == BT_PRESS){
+        machine_state = STATE_ERROR;
+        error_code = 102;
+    }
+}
+
+void inline check_temperature() {
+    if (PORTBbits.RB3 == BT_PRESS){
+        machine_state = STATE_ERROR;
+        error_code = 101;
+    }
+}
+
+void inline make_chosen_one() {
+    LCD_Cmd(L_CLEAR);
+    LCD_Cmd(L_LINE_1); LCD_String("Przygotowywanie");
+    LCD_Cmd(L_LINE_2); LCD_String("kawy...");
+
+    switch(choice) {
+        case 1:
+            add_water();
+            add_coffee();
+            add_milk();
+            add_sugar();
+            break;
+        case 2:
+            add_water();
+            add_coffee();
+            break;
+        case 3:
+            add_water();
+            add_coffee();
+            add_cocoa();
+            add_sugar();
+            add_milk();
+            break;
+        case 4:
+            add_water();
+            add_coffee();
+            add_milk_foam();
+            break;
+        default: break;
+    }
+}
+
+void display_menu() {
+        LCD_Cmd(L_CLEAR);
+        LCD_Cmd(L_LINE_1); LCD_String("Wybierz kawe ");
+        LCD_Cmd(L_LINE_2); LCD_String("1 - Latte ");
+        LCD_Cmd(L_LINE_3); LCD_String("2 - Espresso ");
+        LCD_Cmd(L_LINE_4); LCD_String("3 - Mocha ");
+
+
+        while (choice == 255 || choice == 0) {
+        readKey(0);
+        }
+        switch(choice) {
+            case 49:
+                coffee = "Latte";
+                break;
+            case 50:
+                coffee = "Espresso";
+                break;
+            case 51:
+                coffee = "Mocha";
+                break;
+
+        }
+}
+
+void display_notification(char *line_1, char *line_2, char *line_3, char *line_4 /*EACH MAX 16 CHARACTERS*/) {
+    LCD_Cmd(L_CLEAR);
+    LCD_Cmd(L_LINE_1); LCD_String(line_1);
+    LCD_Cmd(L_LINE_2); LCD_String(line_2);
+    LCD_Cmd(L_LINE_3); LCD_String(line_3);
+    LCD_Cmd(L_LINE_4); LCD_String(line_4);
+    return;
+}
+
+void main() {
+
+    initTimer();
+    init();
+    LCD_Init();
+    int cukier = 0;
+
+    while(1) {
+        switch(machine_state) {
+            case STATE_POWERUP:
+                TRISB = 0x02;
+                heater_OFF();
+                pump_OFF();
+                display_ON;
+
+                if (refresh_screen == 1) {
+                    display_menu();
+                    refresh_screen = 0;
+                    soft_timer_1 = 10;
+                }
+                if (soft_timer_1 == 0) {
+                    refresh_screen = 1;
+                    machine_state = STATE_READY;
+                    TRISB  = 0x3F;  // enable RB5-RB0 buttons
+                }
+                break;
+
+            case STATE_READY:
+                check_ingredients();
+                check_cup();
+
+                check_water_level();
+                check_temperature();
+
+                if (refresh_screen == 1) {
+                    display_notification("Wybrano kawe", coffee, "", "");
+                    refresh_screen = 0;
+                    soft_timer_1 = 10;
+                }
+                if (soft_timer_1 == 0) {
+                    machine_state = STATE_PREPARE;
+                    refresh_screen = 1;
+                }
+                break;
+
+            case STATE_PREPARE:
+                if (refresh_screen == 1) {
+                   pump_ON();
+                   heater_ON();
+                   refresh_screen = 0;
+                }
+                check_water_level();
+                check_temperature();
+
+                if (PORTBbits.RB1 == BT_PRESS){
+                    machine_state = STATE_MIX_IN;
+                    refresh_screen = 1;
+                    soft_timer_1 = 20;
+                }
+                break;
+
+            case STATE_MIX_IN:
+                if (soft_timer_1 > 0 && refresh_screenB == 1) {
+                    make_chosen_one();
+                    refresh_screenB = 0;
+                }
+                check_water_level();
+                check_temperature();
+
+                if (soft_timer_1 == 0) {
+                    heater_OFF();
+                    pump_OFF();
+                    if (refresh_screen == 1) {
+                        display_notification("Dodac cukier?", "TAK (RB1)", "NIE (RB2)", "");
+                        refresh_screen = 0;
+                    }
+                }
+                if (PORTBbits.RB1 == BT_PRESS && soft_timer_1 == 0){
+                    refresh_screen = 1;
+                    refresh_screenB = 1;
+                    cukier = 1;
+                    machine_state = STATE_FINISH;
+                }
+                else if (PORTBbits.RB2 == BT_PRESS && soft_timer_1 == 0){
+                    refresh_screen = 1;
+                    refresh_screenB = 1;
+                    cukier = 0;
+                    machine_state = STATE_FINISH;
+                }
+                break;
+
+            case STATE_FINISH:
+               if (refresh_screen == 1) {
+                   if (cukier) {
+                       display_notification("Dodano cukier","Smacznej Kawy!", "Wcisnij RB1", "by kontynuowac");
+                   }
+                   else
+                   {
+                    display_notification("Kawa gotowa!", "Wcisnij RB1", "by kontynuowac", "");
+                   }
+                    refresh_screen = 0;
+               }
+               if (PORTBbits.RB1 == BT_PRESS){
+                    machine_state = STATE_POWERUP;
+                    choice = 0;
+                    refresh_screen = 1;
+               }
+               break;
+
+            case STATE_ERROR:
+                heater_OFF();
+                pump_OFF();
+                if (refresh_screenB == 1) {
+                    switch(error_code) {
+                        case 102:
+                            display_notification("Wystapil blad!", "", "Sprawdz poziom", "wody!");
+                            break;
+                        case 101:
+                            display_notification("Wystapil blad!", "", "Temperatura", "za wysoka!");
+                            break;
+                        case 0:
+                            break;
+                        default:
+                            break;
+                    }
+                    refresh_screenB = 0;
+                }
+
+                if (PORTBbits.RB1 == BT_PRESS){
+                    machine_state = STATE_POWERUP;
+                    choice = 0;
+                    refresh_screen = 1;
+                    refresh_screenB = 1;
+               }
+                break;
+
+            default:
+                break;
+        }
+    }
+}
